@@ -5,5 +5,9 @@ pandas
 gspread
 oauth2client
 opencv-contrib-python
+easyocr
+torch
+torchvision
+opencv-python
 
 
