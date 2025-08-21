@@ -4,3 +4,5 @@ pytesseract
 pandas
 gspread
 oauth2client
+opencv-contrib-python
+
