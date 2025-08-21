@@ -1,13 +1,13 @@
 import streamlit as st
 import cv2
-import pytesseract
 import pandas as pd
 import tempfile
 import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import easyocr
 
-st.title("⚾ 野球スコアOCR（手書き・自動列検出版）")
+st.title("⚾ 野球スコアOCR（手書き・列自動検出・前処理強化版）")
 
 # -----------------------------
 # Google Sheets 認証
@@ -30,22 +30,50 @@ if uploaded_file:
         tmp.write(uploaded_file.read())
         img_path = tmp.name
 
+    # 画像読み込み
     img = cv2.imread(img_path)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # -----------------------------
+    # 前処理1: ノイズ除去・コントラスト強化
+    # -----------------------------
     gray = cv2.medianBlur(gray, 3)
     gray = cv2.equalizeHist(gray)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)  # 反転で輪郭検出しやすく
 
-    # 輪郭検出で列を自動検出
+    # -----------------------------
+    # 前処理2: 二値化
+    # -----------------------------
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # -----------------------------
+    # 前処理3: 輪郭で傾き補正
+    # -----------------------------
+    coords = np.column_stack(np.where(thresh > 0))
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+    (h, w) = thresh.shape[:2]
+    M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
+    thresh = cv2.warpAffine(thresh, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    gray = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+    # -----------------------------
+    # 前処理4: 膨張処理（文字を太くして認識向上）
+    # -----------------------------
+    kernel = np.ones((2,2), np.uint8)
+    thresh = cv2.dilate(thresh, kernel, iterations=1)
+
+    # -----------------------------
+    # 列の自動検出
+    # -----------------------------
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     column_coords = []
     for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        # 幅が小さいものは除外
-        if w > 20 and h > 20:
-            column_coords.append((x, x + w))
-    
-    # 左から右にソート
+        x, y, w_box, h_box = cv2.boundingRect(cnt)
+        if w_box > 20 and h_box > 20:
+            column_coords.append((x, x + w_box))
     column_coords = sorted(column_coords, key=lambda x: x[0])
 
     st.subheader("検出された列（輪郭）")
@@ -55,18 +83,24 @@ if uploaded_file:
     st.image(img_disp, use_column_width=True)
 
     # -----------------------------
-    # 列ごと OCR
+    # EasyOCRで列ごと OCR
     # -----------------------------
+    reader = easyocr.Reader(['ja'])  # 日本語対応
     rows_data = []
-    custom_config = r'--oem 1 --psm 6'  # LSTM 手書き用
 
     for idx, (x1, x2) in enumerate(column_coords):
         col_img = gray[:, x1:x2]
-        # ノイズ除去・二値化
-        col_img = cv2.medianBlur(col_img, 3)
+        # 列ごとリサイズ（文字を大きく）
+        scale_percent = 200
+        width = int(col_img.shape[1] * scale_percent / 100)
+        height = int(col_img.shape[0] * scale_percent / 100)
+        col_img = cv2.resize(col_img, (width, height), interpolation=cv2.INTER_LINEAR)
+
+        # 二値化（OCR向け）
         _, col_img = cv2.threshold(col_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        text = pytesseract.image_to_string(col_img, lang="jpn", config=custom_config)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+        result = reader.readtext(col_img, detail=0)
+        lines = [line.strip() for line in result if line.strip()]
         rows_data.append(lines)
 
     # 列ごとに長さを合わせる
@@ -75,10 +109,10 @@ if uploaded_file:
         if len(rows_data[i]) < max_len:
             rows_data[i] += [""] * (max_len - len(rows_data[i]))
 
-    # 列名は自動で Col1, Col2... に
+    # 列名は自動で Col1, Col2...
     df = pd.DataFrame({f"Col{idx+1}": rows_data[idx] for idx in range(len(rows_data))})
 
-    st.subheader("解析データ（手書き・列自動検出）")
+    st.subheader("解析データ（手書き・列自動検出・前処理強化版）")
     st.dataframe(df)
 
     # -----------------------------
