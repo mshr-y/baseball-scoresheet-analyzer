@@ -6,8 +6,9 @@ import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import easyocr
+import re
 
-st.title("⚾ 野球スコアOCR（手書き・列自動検出・前処理強化版）")
+st.title("⚾ 野球スコアOCR（手書き・精度強化版）")
 
 # -----------------------------
 # Google Sheets 認証
@@ -30,24 +31,19 @@ if uploaded_file:
         tmp.write(uploaded_file.read())
         img_path = tmp.name
 
-    # 画像読み込み
     img = cv2.imread(img_path)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     # -----------------------------
-    # 前処理1: ノイズ除去・コントラスト強化
+    # 前処理: ノイズ除去・コントラスト強化
     # -----------------------------
     gray = cv2.medianBlur(gray, 3)
     gray = cv2.equalizeHist(gray)
 
-    # -----------------------------
-    # 前処理2: 二値化
-    # -----------------------------
+    # 二値化（反転）
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # -----------------------------
-    # 前処理3: 輪郭で傾き補正
-    # -----------------------------
+    # 傾き補正
     coords = np.column_stack(np.where(thresh > 0))
     angle = cv2.minAreaRect(coords)[-1]
     if angle < -45:
@@ -59,14 +55,12 @@ if uploaded_file:
     thresh = cv2.warpAffine(thresh, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     gray = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
-    # -----------------------------
-    # 前処理4: 膨張処理（文字を太くして認識向上）
-    # -----------------------------
+    # 膨張処理
     kernel = np.ones((2,2), np.uint8)
     thresh = cv2.dilate(thresh, kernel, iterations=1)
 
     # -----------------------------
-    # 列の自動検出
+    # 列ごと輪郭検出
     # -----------------------------
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     column_coords = []
@@ -85,23 +79,36 @@ if uploaded_file:
     # -----------------------------
     # EasyOCRで列ごと OCR
     # -----------------------------
-    reader = easyocr.Reader(['ja'])  # 日本語対応
+    reader = easyocr.Reader(['ja'])
     rows_data = []
 
     for idx, (x1, x2) in enumerate(column_coords):
         col_img = gray[:, x1:x2]
-        # 列ごとリサイズ（文字を大きく）
+        # 列ごとリサイズ
         scale_percent = 200
         width = int(col_img.shape[1] * scale_percent / 100)
         height = int(col_img.shape[0] * scale_percent / 100)
         col_img = cv2.resize(col_img, (width, height), interpolation=cv2.INTER_LINEAR)
-
-        # 二値化（OCR向け）
         _, col_img = cv2.threshold(col_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         result = reader.readtext(col_img, detail=0)
         lines = [line.strip() for line in result if line.strip()]
-        rows_data.append(lines)
+
+        # -----------------------------
+        # OCR後の簡易補正
+        # -----------------------------
+        corrected_lines = []
+        for i, line in enumerate(lines):
+            # 打順は数字のみ
+            if idx == 0:
+                line = re.sub(r'\D', '', line)
+            # 結果はスコア用語のみ残す（例: 安打, 三振, 四球）
+            elif idx == 2:
+                allowed = ['安打', '三振', '四球', '敬遠', '失策', '犠打', '犠飛']
+                if line not in allowed:
+                    line = ''
+            corrected_lines.append(line)
+        rows_data.append(corrected_lines)
 
     # 列ごとに長さを合わせる
     max_len = max(len(lst) for lst in rows_data)
@@ -109,10 +116,10 @@ if uploaded_file:
         if len(rows_data[i]) < max_len:
             rows_data[i] += [""] * (max_len - len(rows_data[i]))
 
-    # 列名は自動で Col1, Col2...
+    # 列名
     df = pd.DataFrame({f"Col{idx+1}": rows_data[idx] for idx in range(len(rows_data))})
 
-    st.subheader("解析データ（手書き・列自動検出・前処理強化版）")
+    st.subheader("解析データ（最適化版）")
     st.dataframe(df)
 
     # -----------------------------
