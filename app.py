@@ -3,15 +3,16 @@ import cv2
 import pytesseract
 import pandas as pd
 import tempfile
+import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-st.title("⚾ 野球スコアOCR登録ツール（試作）")
+st.title("⚾ 野球スコアOCR登録ツール（精度改善版）")
 
-# Google Sheets 認証
+# -----------------------------
+# Google Sheets 認証関数
+# -----------------------------
 def connect_gsheet():
-    # Streamlit Cloud の Secrets に credentials を保存して呼び出し
-    # st.secrets["gcp_service_account"] に JSON を入れておく
     creds_dict = st.secrets["gcp_service_account"]
     scope = ["https://spreadsheets.google.com/feeds",
              "https://www.googleapis.com/auth/drive"]
@@ -19,6 +20,9 @@ def connect_gsheet():
     client = gspread.authorize(creds)
     return client
 
+# -----------------------------
+# 画像アップロード
+# -----------------------------
 uploaded_file = st.file_uploader("スコアシート画像をアップロードしてください", type=["jpg","jpeg","png"])
 
 if uploaded_file:
@@ -27,15 +31,47 @@ if uploaded_file:
         tmp.write(uploaded_file.read())
         img_path = tmp.name
 
-    # OCR
+    # 画像読み込み
     img = cv2.imread(img_path)
+
+    # -----------------------------
+    # 画像前処理
+    # -----------------------------
+    # グレースケール化
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    text = pytesseract.image_to_string(gray, lang="jpn")
+
+    # ノイズ除去
+    gray = cv2.medianBlur(gray, 3)
+
+    # コントラスト強化
+    gray = cv2.equalizeHist(gray)
+
+    # 二値化
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # サイズ拡大（小さい文字向け）
+    scale_percent = 150  # 1.5倍
+    width = int(thresh.shape[1] * scale_percent / 100)
+    height = int(thresh.shape[0] * scale_percent / 100)
+    dim = (width, height)
+    resized = cv2.resize(thresh, dim, interpolation=cv2.INTER_LINEAR)
+
+    # Streamlit に前処理後の画像を表示
+    st.subheader("前処理後の画像")
+    st.image(resized, use_column_width=True)
+
+    # -----------------------------
+    # OCR
+    # -----------------------------
+    custom_config = r'--oem 3 --psm 6'
+    text = pytesseract.image_to_string(resized, lang="jpn", config=custom_config)
 
     st.subheader("OCR抽出結果（生データ）")
     st.text(text)
 
-    # 簡易パース（例：行ごとに「打順 選手名 結果」）
+    # -----------------------------
+    # 簡易パース（例：打順 選手名 結果）
+    # -----------------------------
     rows = []
     for line in text.splitlines():
         parts = line.split()
@@ -47,6 +83,9 @@ if uploaded_file:
         st.subheader("解析データ（仮）")
         st.dataframe(df)
 
+        # -----------------------------
+        # Googleスプレッドシートに登録
+        # -----------------------------
         if st.button("Googleスプレッドシートに登録"):
             try:
                 client = connect_gsheet()
