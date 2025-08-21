@@ -8,7 +8,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import easyocr
 import gc
 
-st.title("⚾ 手書きスコアOCR（Community Cloud 安定版）")
+st.title("⚾ 手書きスコアOCR（軽量・安定版）")
 
 # -----------------------------
 # Google Sheets 認証
@@ -42,12 +42,12 @@ if uploaded_file:
     img = cv2.imread(img_path)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # リサイズ（幅1000px以下）
+    # 幅 800px に制限
     h, w = gray.shape
-    if w > 1000:
-        ratio = 1000 / w
-        gray = cv2.resize(gray, (1000, int(h*ratio)), interpolation=cv2.INTER_AREA)
-        img = cv2.resize(img, (1000, int(h*ratio)), interpolation=cv2.INTER_AREA)
+    if w > 800:
+        ratio = 800 / w
+        gray = cv2.resize(gray, (800, int(h*ratio)), interpolation=cv2.INTER_AREA)
+        img = cv2.resize(img, (800, int(h*ratio)), interpolation=cv2.INTER_AREA)
 
     # ノイズ除去・コントラスト強化
     gray = cv2.medianBlur(gray, 3)
@@ -56,7 +56,9 @@ if uploaded_file:
     # 二値化反転
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # OCR 実行
+    # -----------------------------
+    # EasyOCR 実行（全体より列ごと優先）
+    # -----------------------------
     result = reader.readtext(gray, detail=0)
     text_lines = [line.strip() for line in result if line.strip()]
 
