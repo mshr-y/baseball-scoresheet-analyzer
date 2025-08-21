@@ -1,9 +1,9 @@
-streamlit
-pandas
-gspread
-oauth2client
 easyocr
 torch
 torchvision
 opencv-python
 numpy
+pandas
+streamlit
+gspread
+oauth2client
