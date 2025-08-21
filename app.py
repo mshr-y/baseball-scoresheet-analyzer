@@ -1,14 +1,15 @@
 import streamlit as st
 import cv2
 import pandas as pd
-import tempfile
 import numpy as np
+import tempfile
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import easyocr
 import re
+import gc
 
-st.title("⚾ 野球スコアOCR（手書き・精度強化版）")
+st.title("⚾ 手書きスコアOCR（Community Cloud 安定版）")
 
 # -----------------------------
 # Google Sheets 認証
@@ -20,6 +21,14 @@ def connect_gsheet():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
     return client
+
+# -----------------------------
+# EasyOCR 初期化（1回だけ）
+# -----------------------------
+@st.cache_resource
+def get_reader():
+    return easyocr.Reader(['ja'], gpu=False)
+reader = get_reader()
 
 # -----------------------------
 # 画像アップロード
@@ -35,12 +44,19 @@ if uploaded_file:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     # -----------------------------
-    # 前処理: ノイズ除去・コントラスト強化
+    # 前処理: ノイズ除去・コントラスト強化・傾き補正
     # -----------------------------
     gray = cv2.medianBlur(gray, 3)
     gray = cv2.equalizeHist(gray)
 
-    # 二値化（反転）
+    # 最大幅を1000pxに制限（Community Cloud向け）
+    h, w = gray.shape
+    if w > 1000:
+        ratio = 1000 / w
+        gray = cv2.resize(gray, (1000, int(h*ratio)), interpolation=cv2.INTER_AREA)
+        img = cv2.resize(img, (1000, int(h*ratio)), interpolation=cv2.INTER_AREA)
+
+    # 二値化反転
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     # 傾き補正
@@ -52,8 +68,8 @@ if uploaded_file:
         angle = -angle
     (h, w) = thresh.shape[:2]
     M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
-    thresh = cv2.warpAffine(thresh, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     gray = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    thresh = cv2.warpAffine(thresh, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
     # 膨張処理
     kernel = np.ones((2,2), np.uint8)
@@ -70,56 +86,57 @@ if uploaded_file:
             column_coords.append((x, x + w_box))
     column_coords = sorted(column_coords, key=lambda x: x[0])
 
-    st.subheader("検出された列（輪郭）")
+    st.subheader("検出された列")
     img_disp = img.copy()
     for x1, x2 in column_coords:
         cv2.rectangle(img_disp, (x1,0), (x2,img.shape[0]), (0,255,0), 2)
     st.image(img_disp, use_column_width=True)
 
     # -----------------------------
-    # EasyOCRで列ごと OCR
+    # EasyOCR で列ごと OCR
     # -----------------------------
-    reader = easyocr.Reader(['ja'])
     rows_data = []
-
     for idx, (x1, x2) in enumerate(column_coords):
         col_img = gray[:, x1:x2]
-        # 列ごとリサイズ
-        scale_percent = 200
-        width = int(col_img.shape[1] * scale_percent / 100)
-        height = int(col_img.shape[0] * scale_percent / 100)
-        col_img = cv2.resize(col_img, (width, height), interpolation=cv2.INTER_LINEAR)
+
+        # 列幅が狭い場合は拡大
+        if col_img.shape[1] < 200:
+            scale = 200 / col_img.shape[1]
+            col_img = cv2.resize(col_img, (int(col_img.shape[1]*scale), int(col_img.shape[0]*scale)), interpolation=cv2.INTER_LINEAR)
+
+        # 二値化
         _, col_img = cv2.threshold(col_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+        # OCR
         result = reader.readtext(col_img, detail=0)
         lines = [line.strip() for line in result if line.strip()]
 
-        # -----------------------------
-        # OCR後の簡易補正
-        # -----------------------------
-        corrected_lines = []
-        for i, line in enumerate(lines):
-            # 打順は数字のみ
+        # OCR後補正
+        corrected = []
+        for line in lines:
             if idx == 0:
+                # 打順: 数字のみ
                 line = re.sub(r'\D', '', line)
-            # 結果はスコア用語のみ残す（例: 安打, 三振, 四球）
             elif idx == 2:
-                allowed = ['安打', '三振', '四球', '敬遠', '失策', '犠打', '犠飛']
+                # 結果: スコア用語のみ
+                allowed = ['安打','三振','四球','敬遠','失策','犠打','犠飛']
                 if line not in allowed:
                     line = ''
-            corrected_lines.append(line)
-        rows_data.append(corrected_lines)
+            corrected.append(line)
+        rows_data.append(corrected)
 
-    # 列ごとに長さを合わせる
+        # メモリ解放
+        del col_img
+        gc.collect()
+
+    # 列ごとに長さを揃える
     max_len = max(len(lst) for lst in rows_data)
     for i in range(len(rows_data)):
         if len(rows_data[i]) < max_len:
             rows_data[i] += [""] * (max_len - len(rows_data[i]))
 
-    # 列名
     df = pd.DataFrame({f"Col{idx+1}": rows_data[idx] for idx in range(len(rows_data))})
-
-    st.subheader("解析データ（最適化版）")
+    st.subheader("解析結果（最適化版）")
     st.dataframe(df)
 
     # -----------------------------
@@ -129,8 +146,8 @@ if uploaded_file:
         try:
             client = connect_gsheet()
             sheet = client.open("野球スコア").sheet1
-            for index, row in df.iterrows():
+            for _, row in df.iterrows():
                 sheet.append_row(row.tolist())
-            st.success("✅ Googleスプレッドシートに登録しました！")
+            st.success("✅ 登録完了")
         except Exception as e:
-            st.error(f"Googleスプレッドシート登録でエラー: {e}")
+            st.error(f"スプレッドシート登録でエラー: {e}")
