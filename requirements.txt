@@ -1,9 +1,9 @@
 streamlit
 pandas
-numpy
 gspread
 oauth2client
 easyocr
 torch
 torchvision
 opencv-python
+numpy
